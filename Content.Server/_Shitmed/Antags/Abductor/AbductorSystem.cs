@@ -43,6 +43,8 @@ public sealed partial class AbductorSystem : SharedAbductorSystem
 
     public override void Initialize()
     {
+        SubscribeLocalEvent<AbductorHumanObservationConsoleComponent, ExitConsoleEvent>(OnExitConsole);
+        SubscribeLocalEvent<AbductorHumanObservationConsoleComponent, SendYourselfEvent>(OnSendYourself);
         SubscribeLocalEvent<AbductorHumanObservationConsoleComponent, BeforeActivatableUIOpenEvent>(OnBeforeActivatableUIOpen);
         SubscribeLocalEvent<AbductorHumanObservationConsoleComponent, ActivatableUIOpenAttemptEvent>(OnActivatableUIOpenAttempt);
         Subs.BuiEvents<AbductorHumanObservationConsoleComponent>(AbductorCameraConsoleUIKey.Key, subs => subs.Event<AbductorBeaconChosenBuiMsg>(OnAbductorBeaconChosenBuiMsg));
@@ -57,95 +59,117 @@ public sealed partial class AbductorSystem : SharedAbductorSystem
     private void OnAbductorBeaconChosenBuiMsg(Entity<AbductorHumanObservationConsoleComponent> ent, ref AbductorBeaconChosenBuiMsg args)
     {
         OnCameraExit(args.Actor);
-        if (ent.Comp.RemoteEntityProto != null)
+
+        if (ent.Comp.RemoteEntityProto == null)
+            return;
+
+        var beacon = _entityManager.GetEntity(args.Beacon.NetEnt);
+        var eye = SpawnAtPosition(ent.Comp.RemoteEntityProto, Transform(beacon).Coordinates);
+        ent.Comp.RemoteEntity = GetNetEntity(eye);
+
+        if (TryComp<HandsComponent>(args.Actor, out var handsComponent))
         {
-            var beacon = _entityManager.GetEntity(args.Beacon.NetEnt);
-            var eye = SpawnAtPosition(ent.Comp.RemoteEntityProto, Transform(beacon).Coordinates);
-            ent.Comp.RemoteEntity = GetNetEntity(eye);
-
-            if (TryComp<HandsComponent>(args.Actor, out var handsComponent))
+            foreach (var hand in _hands.EnumerateHands(args.Actor, handsComponent))
             {
-                foreach (var hand in _hands.EnumerateHands(args.Actor, handsComponent))
-                {
-                    if (hand.HeldEntity == null)
-                        continue;
+                if (hand.HeldEntity == null)
+                    continue;
+                if (HasComp<UnremoveableComponent>(hand.HeldEntity))
+                    continue;
 
-                    if (HasComp<UnremoveableComponent>(hand.HeldEntity))
-                        continue;
-
-                    _hands.DoDrop(args.Actor, hand, true, handsComponent);
-                }
-
-                if (_virtualItem.TrySpawnVirtualItemInHand(ent.Owner, args.Actor, out var virtItem1))
-                {
-                    EnsureComp<UnremoveableComponent>(virtItem1.Value);
-                }
-
-                if (_virtualItem.TrySpawnVirtualItemInHand(ent.Owner, args.Actor, out var virtItem2))
-                {
-                    EnsureComp<UnremoveableComponent>(virtItem2.Value);
-                }
+                _hands.DoDrop(args.Actor, hand, true, handsComponent);
             }
 
-            var visibility = EnsureComp<VisibilityComponent>(eye);
+            if (_virtualItem.TrySpawnVirtualItemInHand(ent.Owner, args.Actor, out var virtItem1))
+                EnsureComp<UnremoveableComponent>(virtItem1.Value);
 
-            Dirty(ent);
-
-            if (TryComp(args.Actor, out EyeComponent? eyeComp))
-            {
-                _eye.SetVisibilityMask(args.Actor, eyeComp.VisibilityMask | (int) VisibilityFlags.Abductor, eyeComp);
-                _eye.SetTarget(args.Actor, eye, eyeComp);
-                _eye.SetDrawFov(args.Actor, false);
-                _eye.SetRotation(args.Actor, Angle.Zero, eyeComp);
-                if (!HasComp<StationAiOverlayComponent>(args.Actor))
-                    AddComp(args.Actor, new StationAiOverlayComponent { AllowCrossGrid = true });
-                if (!TryComp(eye, out RemoteEyeSourceContainerComponent? remoteEyeSourceContainerComponent))
-                {
-                    remoteEyeSourceContainerComponent = new RemoteEyeSourceContainerComponent { Actor = args.Actor };
-                    AddComp(eye, remoteEyeSourceContainerComponent);
-                }
-                else
-                    remoteEyeSourceContainerComponent.Actor = args.Actor;
-                Dirty(eye, remoteEyeSourceContainerComponent);
-                Dirty(args.Actor, eyeComp);
-            }
-
-            AddActions(args);
-
-            _mover.SetRelay(args.Actor, eye);
+            if (_virtualItem.TrySpawnVirtualItemInHand(ent.Owner, args.Actor, out var virtItem2))
+                EnsureComp<UnremoveableComponent>(virtItem2.Value);
         }
+
+        EnsureComp<VisibilityComponent>(eye);
+        Dirty(ent);
+
+        if (TryComp(args.Actor, out EyeComponent? eyeComp))
+        {
+            _eye.SetVisibilityMask(args.Actor, eyeComp.VisibilityMask | (int)VisibilityFlags.Abductor, eyeComp);
+            _eye.SetTarget(args.Actor, eye, eyeComp);
+            _eye.SetDrawFov(args.Actor, false);
+            _eye.SetRotation(args.Actor, Angle.Zero, eyeComp);
+
+            if (!HasComp<StationAiOverlayComponent>(args.Actor))
+                AddComp(args.Actor, new StationAiOverlayComponent { AllowCrossGrid = true });
+
+            if (!TryComp(eye, out RemoteEyeSourceContainerComponent? remoteEyeSource))
+            {
+                remoteEyeSource = new RemoteEyeSourceContainerComponent { Actor = args.Actor };
+                AddComp(eye, remoteEyeSource);
+            }
+            else
+                remoteEyeSource.Actor = args.Actor;
+
+            Dirty(eye, remoteEyeSource);
+            Dirty(args.Actor, eyeComp);
+        }
+
+        AddActions(args);
+        _mover.SetRelay(args.Actor, eye);
+    }
+
+    private void OnExitConsole(EntityUid uid, AbductorHumanObservationConsoleComponent comp, ExitConsoleEvent args)
+    {
+        if (args.Performer != null)
+            OnCameraExit(args.Performer);
+    }
+
+    private void OnSendYourself(EntityUid uid, AbductorHumanObservationConsoleComponent comp, SendYourselfEvent args)
+    {
+        if (comp.RemoteEntity == null || args.Performer == null)
+            return;
+
+        var performer = args.Performer;
+        var eyeEntity = comp.RemoteEntity.Value;
+
+        if (TryComp<TransformComponent>(eyeEntity, out var eyeXform) &&
+            TryComp<TransformComponent>(performer, out var playerXform))
+        {
+            playerXform.Coordinates = eyeXform.Coordinates; // телепорт к глазу
+        }
+
+        OnCameraExit(performer); // убираем глаз и возвращаем управление
     }
 
     private void OnCameraExit(EntityUid actor)
     {
-        if (TryComp<RelayInputMoverComponent>(actor, out var comp)
-            && TryComp<AbductorScientistComponent>(actor, out var abductorComp))
+        if (!TryComp<RelayInputMoverComponent>(actor, out var comp) || 
+            !TryComp<AbductorScientistComponent>(actor, out var abductorComp))
+            return;
+
+        var relay = comp.RelayEntity;
+        RemComp(actor, comp);
+
+        if (abductorComp.Console != null)
+            _virtualItem.DeleteInHandsMatching(actor, abductorComp.Console.Value);
+
+        if (TryComp(actor, out EyeComponent? eyeComp))
         {
-            var relay = comp.RelayEntity;
-            RemComp(actor, comp);
+            if (HasComp<StationAiOverlayComponent>(actor))
+                RemComp<StationAiOverlayComponent>(actor);
 
-            if (abductorComp.Console != null)
-                _virtualItem.DeleteInHandsMatching(actor, abductorComp.Console.Value);
-
-            if (TryComp(actor, out EyeComponent? eyeComp))
-            {
-                if (HasComp<StationAiOverlayComponent>(actor))
-                    RemComp<StationAiOverlayComponent>(actor);
-
-                _eye.SetVisibilityMask(actor, eyeComp.VisibilityMask ^ (int) VisibilityFlags.Abductor, eyeComp);
-                _eye.SetDrawFov(actor, true);
-                _eye.SetTarget(actor, null, eyeComp);
-            }
-            RemoveActions(actor);
-            QueueDel(relay);
+            _eye.SetVisibilityMask(actor, eyeComp.VisibilityMask & ~(int)VisibilityFlags.Abductor, eyeComp);
+            _eye.SetDrawFov(actor, true);
+            _eye.SetTarget(actor, null, eyeComp);
         }
+
+        RemoveActions(actor);
+
+        if (relay != null)
+            QueueDel(relay);
     }
 
     private void OnBeforeActivatableUIOpen(Entity<AbductorHumanObservationConsoleComponent> ent, ref BeforeActivatableUIOpenEvent args)
     {
         if (!TryComp<AbductorScientistComponent>(args.User, out var abductorComp))
             return;
-
 
         abductorComp.Console = ent.Owner;
         var stations = _stationSystem.GetStations();
@@ -155,12 +179,10 @@ public sealed partial class AbductorSystem : SharedAbductorSystem
         {
             if (_stationSystem.GetLargestGrid(Comp<StationDataComponent>(station)) is not { } grid
                 || !TryComp(station, out MetaDataComponent? stationMetaData))
-                return;
-
-            var mapId = Transform(grid).MapID;
+                continue;
 
             if (!_entityManager.TryGetComponent<NavMapComponent>(grid, out var navMap))
-                return;
+                continue;
 
             result.Add(station.Id, new StationBeacons
             {
@@ -178,5 +200,4 @@ public sealed partial class AbductorSystem : SharedAbductorSystem
         if (!HasComp<AbductorScientistComponent>(args.User))
             args.Cancel();
     }
-
 }
